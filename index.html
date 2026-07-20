@@ -1890,6 +1890,10 @@ async function initFirebaseRT(){
             <button class="hdr-btn" onclick="loadLeads()" title="Recargar">
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
             </button>
+            <button class="btn-sm" id="btnImportarSheet" onclick="importarLeadsDelSheet()" title="Trae del Sheet los leads que aún no están en Firestore" style="display:none">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+              Importar del Sheet
+            </button>
             <span class="leads-count" id="leadsCount"></span>
           </div>
         </div>
@@ -2364,7 +2368,7 @@ async function apiGet(params) {
   const FB = window.FB;
   const { db, auth, collection, doc, getDoc, getDocs, setDoc, updateDoc, addDoc,
           query, where, limit, signInWithEmailAndPassword, signOut, updatePassword,
-          createUserWithEmailAndPassword, secondaryAuth } = FB;
+          createUserWithEmailAndPassword, secondaryAuth, writeBatch } = FB;
   try {
     switch (params.action) {
 
@@ -2484,6 +2488,22 @@ async function apiGet(params) {
         return { ok:true, asignados, noEncontrados };
       }
 
+      // Escribe en Firestore los leads nuevos detectados en el Sheet (ver
+      // importarLeadsDelSheet() en el front) que aún no existen por su `fila`.
+      case 'importarLeadsNuevos': {
+        const nuevos = params.leads || [];
+        const BATCH_SIZE = 450;
+        let escritos = 0;
+        for (let i = 0; i < nuevos.length; i += BATCH_SIZE) {
+          const chunk = nuevos.slice(i, i + BATCH_SIZE);
+          const batch = writeBatch(db);
+          chunk.forEach(lead => batch.set(doc(collection(db,'leads')), lead));
+          await batch.commit();
+          escritos += chunk.length;
+        }
+        return { ok:true, importados: escritos };
+      }
+
       default:
         return { ok:false, error:'Acción no soportada por el backend Firestore: '+params.action };
     }
@@ -2510,6 +2530,106 @@ async function _rbFindLeadDoc(FB, correo, telefono) {
 // Alias: todo va por la misma función (ya no hay distinción GET/POST, todo es Firestore)
 async function apiPost(params) {
   return apiGet(params);
+}
+
+// ══ Importar leads nuevos del Sheet (botón admin, ver btnImportarSheet) ══
+// Lee el CSV publicado del Sheet (File > Compartir > Publicar en la web),
+// compara contra ALL_LEADS por `fila` (número de fila real del Sheet) y sube
+// a Firestore solo las filas que aún no existen. Todo corre en el navegador,
+// sin backend propio: el fetch usa CORS público de Google, y la escritura usa
+// tu sesión ya autenticada (case 'importarLeadsNuevos' en apiGet).
+const SHEET_CSV_URL = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vQ86USJbXOS6Lj7YttArb_RJADLRQzw8toelW3Z1im6K30EZm-Fykyi1wP_rmbCZ22pCiQ5gXuULuzI/pub?gid=5119533&single=true&output=csv';
+
+// Parser CSV mínimo (RFC4180: soporta comas y saltos de línea dentro de comillas).
+function _rbParseCSV(text) {
+  const rows = [];
+  let row = [], field = '', inQuotes = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i], next = text[i+1];
+    if (inQuotes) {
+      if (c === '"' && next === '"') { field += '"'; i++; }
+      else if (c === '"') { inQuotes = false; }
+      else field += c;
+    } else {
+      if (c === '"') inQuotes = true;
+      else if (c === ',') { row.push(field); field = ''; }
+      else if (c === '\r') { /* ignore */ }
+      else if (c === '\n') { row.push(field); rows.push(row); row = []; field = ''; }
+      else field += c;
+    }
+  }
+  if (field.length || row.length) { row.push(field); rows.push(row); }
+  if (!rows.length) return [];
+  const headers = rows[0];
+  return rows.slice(1).map(r => {
+    const o = {};
+    headers.forEach((h, i) => { o[h] = r[i] !== undefined ? r[i] : ''; });
+    return o;
+  });
+}
+
+function _rbMapCsvRowToLead(r, fila) {
+  return {
+    fila,
+    nombre: (r['Nombre'] || '').trim(),
+    correo: (r['Correo'] || '').trim().toLowerCase(),
+    pais: (r['Pais'] || '').trim(),
+    telefono: (r['Telefono'] || '').trim(),
+    fechaInscripcion: (r['Fecha Inscripcion'] || '').trim(),
+    evento: (r['Evento'] || '').trim(),
+    membresia: (r['Tipo Membresia Skool'] || '').trim(),
+    vencimiento: (r['Vencimiento Skool'] || '').trim(),
+    abeja: (r['Abeja'] || '').trim(),
+    com1: (r['Comunicacion 1'] || '').trim(),
+    com2: (r['Comunicacion 2'] || '').trim(),
+    com3: (r['Comunicacion 3'] || '').trim(),
+    com4: (r['Comunicacion 4'] || '').trim(),
+    estado: (r['Estado'] || '').trim(),
+    termino: (r['Termino'] || '').trim(),
+    notas: (r['Notas'] || '').trim(),
+    comprobante: (r['Comprobante'] || '').trim(),
+    fechaTerminoFmt: (r['Fecha Termino'] || '').trim(),
+    terminoTipo: (r['Tipo de Termino'] || '').trim(),
+    plantillas: (r['Plantillas'] || '').trim(),
+  };
+}
+
+async function importarLeadsDelSheet() {
+  if (SESSION.rol !== 'admin') return;
+  const btn = document.getElementById('btnImportarSheet');
+  if (btn) { btn.disabled = true; btn.style.opacity = '0.6'; }
+  try {
+    const resp = await fetch(SHEET_CSV_URL, { cache: 'no-store' });
+    if (!resp.ok) throw new Error('No se pudo leer el Sheet (' + resp.status + ')');
+    const csvText = await resp.text();
+    const rows = _rbParseCSV(csvText);
+
+    const filasExistentes = new Set(ALL_LEADS.map(l => l.fila));
+    const nuevos = [];
+    rows.forEach((r, i) => {
+      const fila = i + 2; // fila 1 = encabezado, igual que en el Sheet original
+      if (filasExistentes.has(fila)) return;
+      const lead = _rbMapCsvRowToLead(r, fila);
+      if (lead.nombre || lead.correo || lead.telefono) nuevos.push(lead);
+    });
+
+    if (!nuevos.length) {
+      alert('No hay leads nuevos: el Sheet y Firestore ya están sincronizados.');
+      return;
+    }
+    if (!confirm(`Se encontraron ${nuevos.length} leads nuevos en el Sheet. ¿Importarlos a Firestore?`)) return;
+
+    const res = await apiPost({ action: 'importarLeadsNuevos', leads: nuevos });
+    if (!res.ok) throw new Error(res.error || 'Error al importar');
+    alert(`${res.importados} leads nuevos importados correctamente.`);
+    _leadsGuardarCache(null); // invalida caché para forzar recarga completa
+    await loadLeads();
+  } catch (e) {
+    console.error('importarLeadsDelSheet error:', e);
+    alert('Error al importar leads del Sheet: ' + (e.message || e));
+  } finally {
+    if (btn) { btn.disabled = false; btn.style.opacity = ''; }
+  }
 }
 
 // Refresca el panel de detalle abierto (overlay de términos o panel lateral) con datos frescos
@@ -5105,6 +5225,8 @@ async function _loadLeadsFromGAS(showLoading) {
     }
     ALL_LEADS = accLeads;
     _leadsGuardarCache(ALL_LEADS);
+    const btnImport = document.getElementById('btnImportarSheet');
+    if (btnImport) btnImport.style.display = (SESSION.rol === 'admin') ? '' : 'none';
     if (showLoading) list.innerHTML = loadingHTML('Preparando scores…');
     if (!USUARIOS_CACHE.length && SESSION.rol === 'admin') {
       try { const du = await apiGet({action:'getUsuarios'}); if(du.ok) USUARIOS_CACHE = du.usuarios; } catch(e) {}

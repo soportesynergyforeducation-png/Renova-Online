@@ -1,0 +1,25 @@
+{
+  "name": "copia-renova",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/soportesynergyforeducation-png/Renova-Online.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/soportesynergyforeducation-png/Renova-Online/issues"
+  },
+  "homepage": "https://github.com/soportesynergyforeducation-png/Renova-Online#readme",
+  "dependencies": {
+    "csv-parse": "^7.0.1",
+    "firebase": "^12.16.0"
+  }
+}
