@@ -2381,17 +2381,19 @@ async function apiGet(params) {
           return { ok:false, error:'Usuario o contraseña incorrectos.' };
         }
         const uid = cred.user.uid;
-        // Primero se busca en el mapa hardcodeado (usuarios migrados del Sheet sin
-        // doc en Firestore); si no está ahí, se cae a Firestore (usuarios creados
-        // desde addUsuario sí tienen doc).
-        let u = USUARIOS_HARDCODED[uid];
-        if (!u) {
-          const snap = await getDoc(doc(db,'usuarios',uid));
-          if (!snap.exists()) {
-            await signOut(auth);
-            return { ok:false, error:'Este usuario no tiene perfil (ni hardcodeado ni en Firestore, uid='+uid+').' };
-          }
+        // Firestore manda: es la fuente editable (updateUsuario/toggleUsuario
+        // escriben ahí). El mapa hardcodeado es solo un respaldo por si el doc
+        // no existe (ej. Firestore se borró sin querer).
+        let u;
+        const snap = await getDoc(doc(db,'usuarios',uid));
+        if (snap.exists()) {
           u = snap.data();
+        } else {
+          u = USUARIOS_HARDCODED[uid];
+          if (!u) {
+            await signOut(auth);
+            return { ok:false, error:'Este usuario no tiene perfil (ni en Firestore ni hardcodeado, uid='+uid+').' };
+          }
         }
         if (u.activo === false) {
           await signOut(auth);
@@ -2402,13 +2404,19 @@ async function apiGet(params) {
 
       // ── USUARIOS ──
       case 'getUsuarios': {
-        const usuarios = Object.entries(USUARIOS_HARDCODED).map(([uid,u]) =>
-          ({ usuario:u.usuario||'', nombre:u.nombre||'', rol:u.rol||'abeja', activo:u.activo!==false, fila:uid }));
+        // Firestore manda; el mapa hardcodeado solo rellena a quien no tenga
+        // doc todavía (no debería pasar tras correr scripts/seed_usuarios.mjs).
+        const vistos = new Set();
+        const usuarios = [];
         const snaps = await getDocs(collection(db,'usuarios'));
         snaps.forEach(d => {
-          if (USUARIOS_HARDCODED[d.id]) return; // evita duplicados si algún día se migra a Firestore
           const u = d.data();
           usuarios.push({ usuario:u.usuario||'', nombre:u.nombre||'', rol:u.rol||'abeja', activo:u.activo!==false, fila:d.id });
+          vistos.add(d.id);
+        });
+        Object.entries(USUARIOS_HARDCODED).forEach(([uid,u]) => {
+          if (vistos.has(uid)) return;
+          usuarios.push({ usuario:u.usuario||'', nombre:u.nombre||'', rol:u.rol||'abeja', activo:u.activo!==false, fila:uid });
         });
         return { ok:true, usuarios };
       }
