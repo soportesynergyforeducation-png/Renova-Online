@@ -2469,25 +2469,42 @@ async function apiGet(params) {
       }
 
       case 'updateLead': {
-        const found = await _rbFindLeadDoc(FB, params.correo, params.telefonoBusqueda);
-        if (!found) return { ok:false, error:'Lead no encontrado (correo/teléfono no coincide con ningún registro).' };
+        // Identifica el doc por su _id de Firestore (único). Fallback a
+        // correo/teléfono solo por compatibilidad con llamadas viejas en caché
+        // del navegador; los correos duplicados (82 detectados en la migración)
+        // hacen que ese fallback pueda no ser el lead correcto.
+        let leadId = params.leadId;
+        if (!leadId) {
+          const found = await _rbFindLeadDoc(FB, params.correo, params.telefonoBusqueda);
+          if (!found) return { ok:false, error:'Lead no encontrado (correo/teléfono no coincide con ningún registro).' };
+          leadId = found.id;
+        }
         const patch = {};
         Object.keys(params).forEach(k => {
-          if (k === 'action' || k === 'correo' || k === 'telefonoBusqueda') return;
+          if (['action','correo','telefonoBusqueda','leadId'].includes(k)) return;
           patch[k] = params[k];
         });
-        if (Object.keys(patch).length) await updateDoc(doc(db,'leads',found.id), patch);
+        if (Object.keys(patch).length) await updateDoc(doc(db,'leads',leadId), patch);
         return { ok:true };
       }
 
       case 'bulkAsignar': {
-        const correos   = String(params.correos||'').split(',');
-        const telefonos = String(params.telefonos||'').split(',');
+        const leadIds = String(params.leadIds||'').split(',').filter(Boolean);
         let asignados = 0, noEncontrados = 0;
-        for (let i = 0; i < Math.max(correos.length, telefonos.length); i++) {
-          const found = await _rbFindLeadDoc(FB, correos[i]||'', telefonos[i]||'');
-          if (found) { await updateDoc(doc(db,'leads',found.id), { abeja: params.abeja }); asignados++; }
-          else noEncontrados++;
+        if (leadIds.length) {
+          for (const id of leadIds) {
+            try { await updateDoc(doc(db,'leads',id), { abeja: params.abeja }); asignados++; }
+            catch(e) { noEncontrados++; }
+          }
+        } else {
+          // Fallback por correo/teléfono (compatibilidad con llamadas viejas en caché).
+          const correos   = String(params.correos||'').split(',');
+          const telefonos = String(params.telefonos||'').split(',');
+          for (let i = 0; i < Math.max(correos.length, telefonos.length); i++) {
+            const found = await _rbFindLeadDoc(FB, correos[i]||'', telefonos[i]||'');
+            if (found) { await updateDoc(doc(db,'leads',found.id), { abeja: params.abeja }); asignados++; }
+            else noEncontrados++;
+          }
         }
         return { ok:true, asignados, noEncontrados };
       }
@@ -3434,6 +3451,7 @@ async function submitComprobante(fila) {
     // API: solo campos sin validación estricta + termino/estado si son valores permitidos
     const params = {
       action:           'updateLead',
+      leadId:           lead._id || '',
       correo:           lead.correo   || '',
       telefonoBusqueda: lead.telefono || '',
       evento:           fv('dp_evento')      || lead.evento      || '',
@@ -3574,7 +3592,7 @@ async function verificarPago(fila) {
     Object.assign(ALL_LEADS[idx], campos);
     pingUpdate(ALL_LEADS[idx].fila, campos);
     // GAS en background — no bloquea la verificación
-    apiGet({ action:'updateLead', correo: ALL_LEADS[idx].correo||'', telefonoBusqueda: ALL_LEADS[idx].telefono||'', ...campos })
+    apiGet({ action:'updateLead', leadId: ALL_LEADS[idx]._id||'', correo: ALL_LEADS[idx].correo||'', telefonoBusqueda: ALL_LEADS[idx].telefono||'', ...campos })
       .catch(e => console.warn('verificarPago: save profile error', e));
   }
 
@@ -4040,10 +4058,8 @@ async function applyBulkAbeja() {
   btn.disabled = true;
   btn.textContent = 'Guardando…';
 
-  // Buscar por correo y teléfono en lugar de fila
-  const selLeads  = [...SELECTED_FILAS].map(fila => ALL_LEADS.find(l => l.fila === fila)).filter(Boolean);
-  const correos   = selLeads.map(l => l.correo   || '').join(',');
-  const telefonos = selLeads.map(l => l.telefono || '').join(',');
+  const selLeads = [...SELECTED_FILAS].map(fila => ALL_LEADS.find(l => l.fila === fila)).filter(Boolean);
+  const leadIds  = selLeads.map(l => l._id || '').filter(Boolean).join(',');
 
   try {
     // Notificar a la abeja ANTES del GAS con los datos de asignación para que actualice al instante
@@ -4054,7 +4070,7 @@ async function applyBulkAbeja() {
         type: 'asignacion', filas: filasAsignadas, abeja: abeja
       });
     }
-    const res = await apiGet({ action:'bulkAsignar', correos, telefonos, abeja });
+    const res = await apiGet({ action:'bulkAsignar', leadIds, abeja });
     if (res.ok) {
       pingUpdate();
       SELECTED_FILAS.forEach(fila => {
@@ -4102,6 +4118,7 @@ async function saveLead(fila){
 
   const params={
     action:'updateLead',
+    leadId:          lead._id||'',
     correo:          lead.correo||'',
     telefonoBusqueda:lead.telefono||'',
     evento:          fv('dp_evento')      || lead.evento      || '',
