@@ -2460,7 +2460,11 @@ async function apiGet(params) {
         }
         const leads = [];
         snaps.forEach(d => leads.push({ ...d.data(), _id:d.id }));
-        // Sin paginación real: se trae todo en una sola lectura (optimizado para plan gratuito).
+        leads.forEach(_rbComputeVigencia);
+        // Sin paginación real: se trae todo en una sola lectura (optimizado para plan
+        // gratuito). Se reporta pageSize = totalRows para que el loop de paginación del
+        // front (_loadLeadsFromGAS, pensado para el backend viejo que sí paginaba) vea
+        // "1 sola página" y no repita la misma llamada concatenando duplicados.
         return { ok:true, leads, totalRows: leads.length, page:0, pageSize: leads.length||1 };
       }
 
@@ -2511,6 +2515,28 @@ async function apiGet(params) {
     console.error('apiGet (Firestore) error for', params.action, ':', e);
     return { ok:false, error: e.message || 'Error de Firestore' };
   }
+}
+
+// Calcula estadoVigencia/diasParaVencer de un lead a partir de su fecha de
+// vencimiento (columna "Vencimiento Skool"; si no es parseable, se usa
+// fechaInscripcion + duración de la membresía como respaldo, igual que
+// calcVencimiento() más abajo). Esto reemplaza el cálculo que antes hacía el
+// backend de Apps Script (no incluido en este repo) y que el front consume
+// vía l.estadoVigencia / l.diasParaVencer (ver loadStats(), filtros por chip,
+// vigenciaBadge()).
+function _rbComputeVigencia(l) {
+  let venc = parseFechaInscripcionFlex(l.vencimiento);
+  if (!venc) venc = calcVencimiento(l);
+  if (!venc) { l.diasParaVencer = null; return; }
+  const hoy = new Date(); hoy.setHours(0,0,0,0);
+  const v = new Date(venc.getTime()); v.setHours(0,0,0,0);
+  const dias = Math.round((v - hoy) / 86400000);
+  l.diasParaVencer = dias;
+  if (dias < 0)       l.estadoVigencia = 'vencido';
+  else if (dias === 0) l.estadoVigencia = 'vence-hoy';
+  else if (dias <= 7)  l.estadoVigencia = 'urgente';
+  else if (dias <= 30) l.estadoVigencia = 'por-vencer';
+  else                 l.estadoVigencia = 'vigente';
 }
 
 // Busca un lead por correo (prioridad) o teléfono. 1 lectura de Firestore (query con limit 1).
@@ -5066,7 +5092,10 @@ async function loadLeadsSilent() {
     if (!first.ok) { console.warn('loadLeadsSilent: first page failed', first.error); return; }
     let newLeads = first.leads;
     const totalRows = first.totalRows || first.leads.length;
-    const totalPages = Math.ceil(totalRows / PAGE_SIZE_API);
+    // El backend Firestore no pagina de verdad (siempre trae todo en la primera
+    // llamada, ver case 'getLeads' en apiGet): si la primera respuesta ya cubre
+    // totalRows, no repetir llamadas adicionales (evita duplicar leads).
+    const totalPages = (first.leads.length >= totalRows) ? 1 : Math.ceil(totalRows / PAGE_SIZE_API);
     for (let p = 1; p < totalPages; p++) {
       try {
         const res = await apiGet({action:'getLeads', rol:SESSION.rol, usuario:SESSION.usuario, page:p, pageSize:PAGE_SIZE_API});
@@ -5215,7 +5244,10 @@ async function _loadLeadsFromGAS(showLoading) {
     }
     let accLeads = first.leads;
     const totalRows = first.totalRows || first.leads.length;
-    const totalPages = Math.ceil(totalRows / PAGE_SIZE_API);
+    // El backend Firestore no pagina de verdad (siempre trae todo en la primera
+    // llamada, ver case 'getLeads' en apiGet): si la primera respuesta ya cubre
+    // totalRows, no repetir llamadas adicionales (evita duplicar leads).
+    const totalPages = (first.leads.length >= totalRows) ? 1 : Math.ceil(totalRows / PAGE_SIZE_API);
     for (let p = 1; p < totalPages; p++) {
       if (showLoading) list.innerHTML = loadingHTML(`Cargando leads… ${accLeads.length} de ${totalRows}`);
       try {
