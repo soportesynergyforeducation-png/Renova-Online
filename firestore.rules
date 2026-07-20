@@ -3,6 +3,18 @@ rules_version = '2';
 // ══════════════════════════════════════════════════════════════════════════
 // Reglas de seguridad de Firestore para RenovaBase (proyecto Firebase: renova-bdonl)
 //
+// El rol/usuario de los 6 usuarios iniciales (migrados del Sheet) está
+// hardcodeado aquí porque NO tienen doc en la colección "usuarios" de
+// Firestore (mismo mapa que USUARIOS_HARDCODED en index.html). Los usuarios
+// creados después desde la app (acción addUsuario) SÍ tienen doc en Firestore
+// y se resuelven automáticamente sin tocar estas reglas.
+//
+// Si agregas un usuario nuevo a mano (fuera de la app):
+//   1. Créalo en Firebase Auth (obtén su UID).
+//   2. Agrégalo aquí Y en USUARIOS_HARDCODED en index.html.
+//   3. Vuelve a desplegar estas reglas.
+// Si lo agregas desde la app (botón "Agregar usuario"): no hay que tocar nada.
+//
 // CÓMO DESPLEGAR (requiere Firebase CLI instalado y sesión iniciada):
 //   1. npm install -g firebase-tools        (si no lo tienes)
 //   2. firebase login
@@ -16,40 +28,63 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
+    // ── Mapa de usuarios hardcodeados (uid -> {usuario, rol}) ──
+    // Los 6 iniciales, sin doc en Firestore. Debe reflejar USUARIOS_HARDCODED
+    // en index.html.
+    function usuarioHardcodeado(uid) {
+      return {
+        'qnOTWWgPcxWcA9r8ZlNhgp8O25R2': { usuario: 'Samuel.Diaz',     rol: 'admin' },
+        'QcRRYwRodKWpRjCFdoAYcbJxNWa2': { usuario: 'Marisol.Zepeda',  rol: 'abeja' },
+        '21SYfLBqKXPH4quAh89WTcfDU9q2': { usuario: 'Marisol.Sanchez', rol: 'coordinador' },
+        'Btdsm7K4H9U1bfYxuZSWQwhYTQu1': { usuario: 'Deborah.Puebla',  rol: 'admin' },
+        'JQQQt2ucMsQBnliHwx9KgoZ1R8t2': { usuario: 'Daniel.Garcia',   rol: 'admin' },
+        'Q9GpiysVyrUl0ojDnH5vqBreXpH3': { usuario: 'Luis.DeLeon',    rol: 'admin' },
+      }[uid];
+    }
+
+    // Usuarios nuevos (creados vía addUsuario) SÍ tienen doc en Firestore.
+    function usuarioEnFirestore(uid) {
+      return exists(/databases/$(database)/documents/usuarios/$(uid))
+        ? get(/databases/$(database)/documents/usuarios/$(uid)).data
+        : null;
+    }
+
     // ── Helpers ──
     function estaLogueado() {
       return request.auth != null;
     }
 
-    // Perfil del usuario autenticado (colección "usuarios", doc id = uid de Firebase Auth)
-    function miPerfil() {
-      return get(/databases/$(database)/documents/usuarios/$(request.auth.uid)).data;
+    // Perfil del usuario autenticado: primero el mapa hardcodeado, si no está
+    // ahí se busca su doc en Firestore. null si no se encuentra en ninguno.
+    function miInfo() {
+      return usuarioHardcodeado(request.auth.uid) != null
+        ? usuarioHardcodeado(request.auth.uid)
+        : usuarioEnFirestore(request.auth.uid);
     }
 
     function miRol() {
-      return miPerfil().rol;
+      return miInfo().rol;
+    }
+
+    // El nombre de usuario (campo "usuario"), usado para comparar contra
+    // lead.abeja (que guarda ese mismo string, no el uid).
+    function miUsuario() {
+      return miInfo().usuario;
     }
 
     function esAdminOCoordinador() {
-      return estaLogueado() && miRol() in ['admin', 'coordinador'];
-    }
-
-    // El nombre de usuario (campo "usuario" del doc en /usuarios) del que llama,
-    // usado para comparar contra lead.abeja (que guarda ese mismo string, no el uid).
-    function miUsuario() {
-      return miPerfil().usuario;
+      return estaLogueado() && miInfo() != null && miRol() in ['admin', 'coordinador'];
     }
 
     // ── usuarios ──
-    // Cualquier usuario autenticado puede LEER la colección completa (se necesita
-    // para poblar dropdowns de asignación de leads, ver getListaAbejas() en el front).
-    // Solo admin puede escribir perfiles de otros usuarios (crear/editar/activar-desactivar).
-    // Un usuario puede editar su propio doc SOLO para campos no sensibles (ver docs
-    // de negocio: hoy el front no permite auto-editar rol/activo, solo password vía
-    // Firebase Auth, que no pasa por Firestore).
+    // Colección legacy/futura: usuarios creados vía addUsuario SÍ tienen doc
+    // aquí; los 6 hardcodeados no la usan. Cualquier usuario autenticado puede
+    // LEER la colección completa (se necesita para poblar dropdowns de
+    // asignación de leads, ver getListaAbejas() en el front). Solo admin puede
+    // escribir perfiles de otros usuarios (crear/editar/activar-desactivar).
     match /usuarios/{uid} {
       allow read: if estaLogueado();
-      allow create, update, delete: if estaLogueado() && miRol() == 'admin';
+      allow create, update, delete: if esAdminOCoordinador() && miRol() == 'admin';
     }
 
     // ── leads ──
@@ -58,11 +93,11 @@ service cloud.firestore {
     // (lead.abeja === su propio "usuario"). No puede reasignar el lead a otra abeja
     // ni crear/eliminar leads (eso lo hace el conector Sheet -> Firestore o un admin).
     match /leads/{leadId} {
-      allow read: if estaLogueado() && (
+      allow read: if estaLogueado() && miInfo() != null && (
         esAdminOCoordinador() || resource.data.abeja == miUsuario()
       );
-      allow create, delete: if estaLogueado() && esAdminOCoordinador();
-      allow update: if estaLogueado() && (
+      allow create, delete: if esAdminOCoordinador();
+      allow update: if estaLogueado() && miInfo() != null && (
         esAdminOCoordinador() ||
         (
           resource.data.abeja == miUsuario() &&
@@ -76,7 +111,7 @@ service cloud.firestore {
     // secuencial a nuevos leads importados desde el Sheet) ──
     match /contadores/{id} {
       allow read: if estaLogueado();
-      allow write: if estaLogueado() && esAdminOCoordinador();
+      allow write: if esAdminOCoordinador();
     }
 
     // Cualquier otra colección: denegado por defecto.
